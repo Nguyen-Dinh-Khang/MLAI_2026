@@ -1,0 +1,66 @@
+# =====================================================================
+# GITIGNORE - CLIENT APP (MLAI DECISION CO-PILOT PLATFORM)
+# =====================================================================
+
+# 1. Bảo mật & Biến môi trường (TUYỆT ĐỐI KHÔNG COMMIT LÊN GIT)
+.env
+.env.*
+*.env
+!.env.example
+secrets.json
+
+# 2. Python Bytecode, Cache & Testing
+**/__pycache__/
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 3. Virtual Environment (Môi trường ảo)
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# 4. Frontend Node & Dependencies
+**/node_modules/
+node_modules/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+frontend/.vite/
+.vite/
+
+# 5. Logs & File tạm thời
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+~$*
+
+# 6. Hệ điều hành (OS junk files)
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# 7. IDEs & Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
