@@ -11,8 +11,9 @@ pydantic>=2.0.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 
-# 2. Cơ sở dữ liệu MongoDB
+# 2. Cơ sở dữ liệu MongoDB & Địa lý
 pymongo[srv]>=4.6.0
+geopy>=2.4.0
 
 # 3. Vector Embedding cục bộ (BAAI/bge-m3)
 torch>=2.1.0

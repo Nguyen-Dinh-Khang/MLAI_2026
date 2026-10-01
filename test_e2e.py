@@ -68,23 +68,46 @@ if res_eval.status_code == 200:
 else:
     print("Lỗi:", res_eval.text)
 
-# 4. Test Giao diện 2: Trợ lý Giải quyết Sự cố (Day 1 - 365)
-print("\n[TEST 4] Kiểm tra Chế độ 2: Trợ lý Sự cố (Khách than chờ lâu bỏ đi)...")
+# 4. Test Giao diện 2: Trợ lý Giải quyết Sự cố & Phản công (Day 1 - 365)
+print("\n[TEST 4A] Kiểm tra Chế độ 2 - Nhánh VẬN HÀNH NỘI BỘ (Khách than chờ lâu)...")
 start_time = time.time()
-res_chat = client.post("/api/copilot/chat", json={
+res_chat_internal = client.post("/api/copilot/chat", json={
     "query": "Quán tôi mở được 2 tuần cạnh trường Đại học. Mấy hôm nay khách than đợi bánh mì lâu quá nên bỏ đi sang quán khác. Tôi chỉ có 2 người làm, làm sao để phục vụ nhanh hơn mà không cần thuê thêm người?",
     "model_id": 105
 })
-print(f"Thời gian xử lý: {time.time() - start_time:.2f}s")
-print("Status Code:", res_chat.status_code)
+print(f"Thời gian xử lý: {time.time() - start_time:.2f}s | Status Code: {res_chat_internal.status_code}")
+assert res_chat_internal.status_code == 200
+data_internal = res_chat_internal.json()
+print("Intent nhận diện:", data_internal["intent"])
+print("Huy hiệu Badge:", data_internal["intent_badge"])
+print("Nguồn CSDL:", data_internal["data_sources"])
+assert data_internal["intent"] == "INTERNAL"
 
-if res_chat.status_code == 200:
-    chat_data = res_chat.json()
-    print("\n--- PHẢN HỒI KỊCH BẢN THỰC CHIẾN TỪ QWEN3.5 4B ---")
-    print(chat_data["ai_response"])
-else:
-    print("Lỗi:", res_chat.text)
+print("\n[TEST 4B] Kiểm tra Chế độ 2 - Nhánh PHẢN CÔNG CẠNH TRANH (Đối thủ sát vách phá giá)...")
+start_time = time.time()
+res_chat_comp = client.post("/api/copilot/chat", json={
+    "query": "Có quán mới mở sát vách bán món giống hệt quán tôi nhưng giá rẻ hơn 20% và tặng kèm trà đá. Khách quen của tôi bị hút qua đó khá nhiều, tôi phải đối phó thế nào mà không cần giảm giá?",
+    "model_id": 105,
+    "address": "268 Lý Thường Kiệt, Quận 10, Hồ Chí Minh",
+    "product_ids": [204, 201]
+})
+print(f"Thời gian xử lý: {time.time() - start_time:.2f}s | Status Code: {res_chat_comp.status_code}")
+assert res_chat_comp.status_code == 200
+data_comp = res_chat_comp.json()
+print("Intent nhận diện:", data_comp["intent"])
+print("Huy hiệu Badge:", data_comp["intent_badge"])
+print("Nguồn CSDL kích hoạt:", data_comp["data_sources"])
+print(f"Số đối thủ quét được (DB2): {data_comp['competitors_count']}")
+print(f"Thông tin DB3 (sự cố): {data_comp['matched_insights']['problems_found']} | DB4 (bài học): {data_comp['matched_insights']['lessons_found']}")
+assert data_comp["intent"] == "COMPETITIVE"
+assert "DB2" in data_comp["data_sources"]
+assert "DB3" in data_comp["data_sources"]
+assert "DB4" in data_comp["data_sources"]
+assert "DB5" in data_comp["data_sources"]
+
+print("\n--- PHẢN HỒI KỊCH BẢN PHẢN CÔNG TỪ QWEN3.5 4B ---")
+print(data_comp["ai_response"])
 
 print("\n" + "=" * 75)
-print("🎉 HOÀN TẤT KIỂM THỬ E2E!")
+print("🎉 HOÀN TẤT KIỂM THỬ E2E CHO CẢ 2 CHẾ ĐỘ!")
 print("=" * 75)

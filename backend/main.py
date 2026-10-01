@@ -8,6 +8,7 @@ Hỗ trợ:
 """
 
 import sys
+import json
 import logging
 import hashlib
 import secrets
@@ -17,7 +18,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Đảm bảo console Windows in tiếng Việt chuẩn UTF-8
@@ -45,6 +46,7 @@ from .pipeline.stress_test_engine import StressTestEngine
 from .pipeline.semantic_search import SemanticSearchEngine
 from .pipeline.distillation import DistillationEngine
 from .pipeline.llm_copilot import LLMCopilot
+from .pipeline.copilot_router import detect_copilot_intent
 
 # Khởi tạo FastAPI app
 app = FastAPI(
@@ -88,6 +90,10 @@ class CopilotChatRequest(BaseModel):
     """Dữ liệu Chat sự cố thực tế (Giao diện 2)"""
     query: str = Field(..., description="Câu hỏi hoặc sự cố thực tế cần tư vấn")
     model_id: Optional[int] = Field(None, description="Mã mô hình quán đang kinh doanh (tùy chọn)")
+    address: Optional[str] = Field(None, description="Địa chỉ quán kinh doanh (tùy chọn để quét đối thủ vi mô)")
+    coordinates: Optional[Dict[str, float]] = Field(None, description="Tọa độ {'lng': float, 'lat': float} (tùy chọn)")
+    product_ids: Optional[List[int]] = Field(None, description="Danh sách mã sản phẩm bán (tùy chọn)")
+    conversation_history: Optional[List[Dict[str, str]]] = Field(None, description="Lịch sử đối thoại trước đó")
 
 
 class RegisterRequest(BaseModel):
@@ -460,13 +466,18 @@ def evaluate_business_feasibility(req: FeasibilityRequest):
 
 
 @app.post("/api/copilot/chat")
-def copilot_chat(req: CopilotChatRequest):
+def copilot_chat(req: CopilotChatRequest, authorization: Optional[str] = Header(None)):
     """
     GIAO DIỆN 2: TRỢ LÝ CHIẾN THUẬT ĐỒNG HÀNH (DAY 1 - 365)
-    Quy trình:
-    1. Tìm kiếm ngữ nghĩa Hybrid trên DB3, DB4, DB5 bằng BAAI/bge-m3.
-    2. Chắt lọc thông tin cốt lõi, khử trùng lặp và nén 80% token.
-    3. LLM Qwen3.5 4B trả lời với Checklist 24h & Lời thoại thực chiến.
+    Bộ định tuyến Agentic Router:
+    1. Phân loại ý định: CẠNH TRANH (COMPETITIVE) vs NỘI BỘ (INTERNAL).
+    2. Nếu CẠNH TRANH:
+       - Lấy vị trí quán (từ user_strategies hoặc input người dùng).
+       - Quét DB2 (Đối thủ 1km) + DB3 (Rủi ro) + DB4 (Kinh nghiệm) + DB5 (Sức mua thị trường).
+       - LLM xuất đòn phản công combo, giữ giá và khai thác điểm yếu đối thủ.
+    3. Nếu NỘI BỘ:
+       - Quét DB3 (Rủi ro & sự cố) + DB4 (Bài học xương máu & lời thoại).
+       - LLM xuất checklist SOP quy trình & đàm phán nội bộ.
     """
     try:
         query_text = req.query.strip()
@@ -475,32 +486,95 @@ def copilot_chat(req: CopilotChatRequest):
 
         logger.info(f"[*] Nhận câu hỏi Co-pilot: '{query_text}' | Model ID: {req.model_id}")
 
-        # Mắt xích 4: Tìm kiếm tương đồng vector Cosine Similarity
-        raw_search = semantic_search_engine.hybrid_search_all(
-            query=query_text,
-            model_id=req.model_id
-        )
+        # Lấy thông tin kế sách đã lưu của người dùng (nếu có đăng nhập)
+        user = get_current_user(authorization) if authorization else None
+        saved_strategy = None
+        if user:
+            db = get_db()
+            saved_strategy = db["user_strategies"].find_one({"username": user["username"]})
 
-        # Mắt xích 5: Bộ chắt lọc & Nén Token
-        distilled = distillation_engine.distill_records(raw_search)
-        context_md = distillation_engine.build_llm_context(distilled)
+        # Ưu tiên dữ liệu người dùng truyền từ giao diện, sau đó đến hồ sơ đã lưu
+        model_id = req.model_id or (saved_strategy.get("model_id") if saved_strategy else None) or 105
+        product_ids = req.product_ids or (saved_strategy.get("product_ids") if saved_strategy else None) or []
+        address = req.address or (saved_strategy.get("address") if saved_strategy else "")
+        req_coords = req.coordinates or (saved_strategy.get("coordinates") if saved_strategy else None)
 
-        # Mắt xích 6: LLM Reasoning
-        model_name = tag_manager.get_tag_name(req.model_id) if req.model_id else "Chung các mô hình"
+        # Xác định tọa độ quán phục vụ việc quét đối thủ 1km
+        lng, lat = 106.6578, 10.7725  # Tọa độ mặc định: Cổng ĐH Bách Khoa, Q10
+        if req_coords and "lng" in req_coords and "lat" in req_coords and float(req_coords.get("lng", 0)) != 0:
+            lng = float(req_coords["lng"])
+            lat = float(req_coords["lat"])
+        elif address:
+            try:
+                calc_lng, calc_lat, _ = geocode_address(address)
+                if calc_lng != 0:
+                    lng, lat = calc_lng, calc_lat
+            except Exception as geo_err:
+                logger.warning(f"Lỗi geocoding địa chỉ copilot: {geo_err}")
+
+        # Mắt xích Định tuyến Ý định (Agentic Intent Router)
+        intent_info = detect_copilot_intent(query_text)
+        intent = intent_info.get("intent", "INTERNAL")
+
+        competitors = []
+        if intent == "COMPETITIVE":
+            # Quét DB2: Đối thủ trong bán kính 1km
+            try:
+                competitors = spatial_engine.get_competitors_within_radius(
+                    lng=lng,
+                    lat=lat,
+                    radius_m=1000.0,
+                    model_id=model_id,
+                    product_ids=product_ids
+                )
+            except Exception as comp_err:
+                logger.warning(f"[!] Lỗi quét đối thủ DB2: {comp_err}")
+                competitors = []
+
+            # Quét đồng thời cả DB3, DB4, DB5 có lọc phân cấp
+            raw_search = semantic_search_engine.hybrid_search_all(
+                query=query_text,
+                model_id=model_id,
+                product_ids=product_ids
+            )
+
+            # Chắt lọc đồng thời DB2 + DB3 + DB4 + DB5
+            distilled = distillation_engine.distill_records(raw_search, competitors=competitors)
+            context_md = distillation_engine.build_llm_context(distilled, intent="COMPETITIVE")
+        else:
+            # Nhánh Nội bộ: Quét DB3, DB4 có lọc phân cấp
+            raw_search = semantic_search_engine.hybrid_search_all(
+                query=query_text,
+                model_id=model_id,
+                product_ids=product_ids
+            )
+            distilled = distillation_engine.distill_records(raw_search)
+            context_md = distillation_engine.build_llm_context(distilled, intent="INTERNAL")
+
+        # Mắt xích 6: LLM Reasoning (kèm lịch sử đa lượt)
+        model_name = tag_manager.get_tag_name(model_id) if model_id else "Chung các mô hình"
         ai_advice = llm_copilot.answer_tactical_copilot(
             user_query=query_text,
             model_name=model_name,
-            context_markdown=context_md
+            context_markdown=context_md,
+            intent=intent,
+            conversation_history=req.conversation_history
         )
 
         return {
             "success": True,
             "query": query_text,
             "model_name": model_name,
+            "intent": intent,
+            "intent_badge": intent_info.get("badge_title", "⚙️ Chế độ: Tối ưu Vận hành Nội bộ"),
+            "intent_detail": intent_info.get("badge_detail", ""),
+            "data_sources": intent_info.get("data_sources", ["DB3", "DB4"]),
+            "competitors_count": len(competitors),
             "matched_insights": {
                 "problems_found": len(distilled.get("problems", [])),
                 "lessons_found": len(distilled.get("lessons", [])),
-                "market_found": len(distilled.get("market", []))
+                "market_found": len(distilled.get("market", [])),
+                "competitors_found": len(distilled.get("competitors", []))
             },
             "distilled_context": context_md,
             "ai_response": ai_advice
@@ -508,6 +582,130 @@ def copilot_chat(req: CopilotChatRequest):
 
     except Exception as e:
         logger.error(f"[!] Lỗi trong quá trình tư vấn Co-pilot: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Lỗi xử lý trợ lý: {str(e)}")
+
+
+@app.post("/api/copilot/chat/stream")
+def copilot_chat_stream(req: CopilotChatRequest, authorization: Optional[str] = Header(None)):
+    """
+    GIAO DIỆN 2: TRỢ LÝ STREAMING REAL-TIME (SERVER-SENT EVENTS - SSE)
+    Truyền tải token-by-token giúp người dùng thấy kết quả ngay sau 1-2 giây.
+    Hỗ trợ Lọc phân cấp 3 tầng, Ma trận Vector và Bộ nhớ hội thoại đa lượt.
+    """
+    try:
+        query_text = req.query.strip()
+        if not query_text:
+            raise HTTPException(status_code=400, detail="Câu hỏi không được để trống")
+
+        logger.info(f"[*] Nhận câu hỏi Co-pilot Streaming: '{query_text}' | Model ID: {req.model_id}")
+
+        # Lấy thông tin kế sách đã lưu của người dùng (nếu có đăng nhập)
+        user = get_current_user(authorization) if authorization else None
+        saved_strategy = None
+        if user:
+            db = get_db()
+            saved_strategy = db["user_strategies"].find_one({"username": user["username"]})
+
+        # Ưu tiên dữ liệu người dùng truyền từ giao diện, sau đó đến hồ sơ đã lưu
+        model_id = req.model_id or (saved_strategy.get("model_id") if saved_strategy else None) or 105
+        product_ids = req.product_ids or (saved_strategy.get("product_ids") if saved_strategy else None) or []
+        address = req.address or (saved_strategy.get("address") if saved_strategy else "")
+        req_coords = req.coordinates or (saved_strategy.get("coordinates") if saved_strategy else None)
+
+        # Xác định tọa độ quán phục vụ việc quét đối thủ 1km
+        lng, lat = 106.6578, 10.7725
+        if req_coords and "lng" in req_coords and "lat" in req_coords and float(req_coords.get("lng", 0)) != 0:
+            lng = float(req_coords["lng"])
+            lat = float(req_coords["lat"])
+        elif address:
+            try:
+                calc_lng, calc_lat, _ = geocode_address(address)
+                if calc_lng != 0:
+                    lng, lat = calc_lng, calc_lat
+            except Exception as geo_err:
+                logger.warning(f"Lỗi geocoding địa chỉ copilot stream: {geo_err}")
+
+        # Mắt xích Định tuyến Ý định (Agentic Intent Router)
+        intent_info = detect_copilot_intent(query_text)
+        intent = intent_info.get("intent", "INTERNAL")
+
+        competitors = []
+        if intent == "COMPETITIVE":
+            try:
+                competitors = spatial_engine.get_competitors_within_radius(
+                    lng=lng,
+                    lat=lat,
+                    radius_m=1000.0,
+                    model_id=model_id,
+                    product_ids=product_ids
+                )
+            except Exception as comp_err:
+                logger.warning(f"[!] Lỗi quét đối thủ DB2: {comp_err}")
+                competitors = []
+
+            raw_search = semantic_search_engine.hybrid_search_all(
+                query=query_text,
+                model_id=model_id,
+                product_ids=product_ids
+            )
+            distilled = distillation_engine.distill_records(raw_search, competitors=competitors)
+            context_md = distillation_engine.build_llm_context(distilled, intent="COMPETITIVE")
+        else:
+            raw_search = semantic_search_engine.hybrid_search_all(
+                query=query_text,
+                model_id=model_id,
+                product_ids=product_ids
+            )
+            distilled = distillation_engine.distill_records(raw_search)
+            context_md = distillation_engine.build_llm_context(distilled, intent="INTERNAL")
+
+        model_name = tag_manager.get_tag_name(model_id) if model_id else "Chung các mô hình"
+
+        def sse_event_stream():
+            # 1. Gửi event metadata đầu tiên chứa các thông tin trạng thái
+            meta_event = {
+                "type": "metadata",
+                "query": query_text,
+                "model_name": model_name,
+                "intent": intent,
+                "intent_badge": intent_info.get("badge_title", "⚙️ Chế độ: Tối ưu Vận hành Nội bộ"),
+                "intent_detail": intent_info.get("badge_detail", ""),
+                "data_sources": intent_info.get("data_sources", ["DB3", "DB4"]),
+                "competitors_count": len(competitors),
+                "matched_insights": {
+                    "problems_found": len(distilled.get("problems", [])),
+                    "lessons_found": len(distilled.get("lessons", [])),
+                    "market_found": len(distilled.get("market", [])),
+                    "competitors_found": len(distilled.get("competitors", []))
+                }
+            }
+            yield f"data: {json.dumps(meta_event, ensure_ascii=False)}\n\n"
+
+            # 2. Streaming từng token từ LLM Qwen3.5 4B qua Ollama
+            for token in llm_copilot.stream_tactical_copilot(
+                user_query=query_text,
+                model_name=model_name,
+                context_markdown=context_md,
+                intent=intent,
+                conversation_history=req.conversation_history
+            ):
+                yield f"data: {json.dumps({'type': 'chunk', 'text': token}, ensure_ascii=False)}\n\n"
+
+            # 3. Gửi event kết thúc
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        return StreamingResponse(
+            sse_event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"[!] Lỗi trong quá trình stream Co-pilot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Lỗi xử lý trợ lý: {str(e)}")
 
 
